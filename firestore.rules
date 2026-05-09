@@ -1,0 +1,98 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // ===============================================================
+    // Helper Functions
+    // ===============================================================
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+    
+    function getUserData() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+    }
+
+    function isAdmin() {
+      return isAuthenticated() && (
+        (exists(/databases/$(database)/documents/users/$(request.auth.uid)) && getUserData().role == 'admin') ||
+        (request.auth.token.email == "zuansah.munggaran@gmail.com" && request.auth.token.email_verified == true)
+      );
+    }
+
+    function isAgent() {
+      return isAuthenticated() && exists(/databases/$(database)/documents/users/$(request.auth.uid)) && getUserData().role == 'agent';
+    }
+
+    function isLender() {
+      return isAuthenticated() && exists(/databases/$(database)/documents/users/$(request.auth.uid)) && getUserData().role == 'lender';
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function hasRequiredFields(fields) {
+      return request.resource.data.keys().hasAll(fields);
+    }
+
+    // ===============================================================
+    // Domain Validators
+    // ===============================================================
+    function isValidUser(data) {
+      return data.role in ['admin', 'agent', 'lender'] &&
+             data.email is string && data.email.size() > 0;
+    }
+
+    function isValidLead(data) {
+      return data.agentId is string && data.agentId.size() > 0 &&
+             data.income is number && data.income >= 0 &&
+             data.householdSize is number && data.householdSize > 0 &&
+             data.zipCode is string && data.zipCode.size() > 0 &&
+             data.isFthb is bool &&
+             data.creditScore is number &&
+             data.purchasePrice is number && data.purchasePrice >= 0;
+    }
+
+    function isValidProperty(data) {
+      return data.agentId is string && data.agentId.size() > 0 &&
+             data.title is string && data.title.size() > 0 && data.title.size() < 200 &&
+             data.price is number && data.price >= 0 &&
+             data.address is string && data.address.size() > 0 && data.address.size() < 500 &&
+             data.zipCode is string && data.zipCode.size() > 0 &&
+             data.propertyType is string;
+    }
+
+    // ===============================================================
+    // Rules
+    // ===============================================================
+    
+    match /users/{userId} {
+      allow read: if isOwner(userId) || isAdmin() || isLender();
+      allow create: if isAuthenticated() && isOwner(userId) && isValidUser(request.resource.data) && (request.resource.data.role != 'admin' || isAdmin());
+      allow update: if isAuthenticated() && isOwner(userId) && isValidUser(request.resource.data) && (request.resource.data.role == resource.data.role || isAdmin());
+      allow delete: if isAdmin();
+    }
+
+    match /leads/{leadId} {
+      // Anyone can create a lead (unauthenticated intake form)
+      allow create: if isValidLead(request.resource.data);
+      // Agents can read their own leads, admins can read all leads.
+      // Lenders can read leads that are unclaimed or claimed by them.
+      allow read: if isAdmin() || 
+                     (isAgent() && resource.data.agentId == request.auth.uid) || 
+                     (isLender() && (!('claimedBy' in resource.data) || resource.data.claimedBy == null || resource.data.claimedBy == request.auth.uid));
+      allow update: if (!isAuthenticated() && (resource.data.status == 'New' || resource.data.status == 'Requested Lender') && isValidLead(request.resource.data)) ||
+                       isAdmin() || 
+                       (isAgent() && resource.data.agentId == request.auth.uid && isValidLead(request.resource.data)) ||
+                       (isLender() && isValidLead(request.resource.data));
+      allow delete: if isAdmin();
+    }
+
+    match /properties/{propertyId} {
+      allow read: if true; // Properties might be public
+      allow create: if (isAgent() && request.resource.data.agentId == request.auth.uid && isValidProperty(request.resource.data)) || isAdmin();
+      allow update: if (isAgent() && resource.data.agentId == request.auth.uid && request.resource.data.agentId == request.auth.uid && isValidProperty(request.resource.data)) || isAdmin();
+      allow delete: if (isAgent() && resource.data.agentId == request.auth.uid) || isAdmin();
+    }
+  }
+}
